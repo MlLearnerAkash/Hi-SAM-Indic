@@ -25,7 +25,7 @@ warnings.filterwarnings("ignore")
 def get_args_parser():
     parser = argparse.ArgumentParser('Hi-SAM', add_help=False)
 
-    parser.add_argument("--input", type=str, required=True, nargs="+",
+    parser.add_argument("--input", type=str, required=True, 
                         help="Path to the input image")
     parser.add_argument("--output", type=str, default='./demo',
                         help="A file or directory to save output visualizations.")
@@ -166,19 +166,25 @@ if __name__ == '__main__':
             fg_points_num = 300
             score_thresh = 0.7
     else:
-        raise ValueError
+        raise ValueError("Unsupported Dataset")
+    if os.path.isdir(args.input):
+        image_paths = [os.path.join(args.input, fname) for fname in os.listdir(args.input) if fname.lower().endswith((".png", ".jpg", ".jpeg"))]
+    # elif len(args.input) == 1:
+    #     args.input = glob.glob(os.path.expanduser(args.input[0]))
+    #     assert args.input, "The input path(s) was not found"
+    os.makedirs(args.output, exist_ok=True)
 
-    if os.path.isdir(args.input[0]):
-        args.input = [os.path.join(args.input[0], fname) for fname in os.listdir(args.input[0])]
-    elif len(args.input) == 1:
-        args.input = glob.glob(os.path.expanduser(args.input[0]))
-        assert args.input, "The input path(s) was not found"
-    for path in tqdm(args.input):
+    for path in tqdm(image_paths):
         img_id = os.path.basename(path).split('.')[0]
+        out_txt_file = os.path.join(args.output, f"{img_id}.txt")
 
+        # image = cv2.imread(path)
+        # image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+        # img_h, img_w = image.shape[:2]
+        
         if os.path.isdir(args.output):
             assert os.path.isdir(args.output), args.output
-            img_name = os.path.basename(path).split('.')[0] + '.png'
+            img_name = os.path.basename(path).split('.')[0] + '.jpeg'
             out_filename = os.path.join(args.output, img_name)
         else:
             assert len(args.input) == 1
@@ -196,11 +202,27 @@ if __name__ == '__main__':
             score_thresh=score_thresh,
             nms_thresh=score_thresh,
             zero_shot=args.zero_shot,
-            dataset=args.dataset
+            dataset=args.dataset,
+
         )
 
         if masks is not None:
-            print('Inference done. Start plotting masks.')
-            show_masks(masks, out_filename, image)
+            # print('Inference done. Start plotting masks.')
+            with open(out_txt_file, 'w') as f:
+                for mask, score in zip(masks, scores):
+                    y_indices, x_indices = np.where(mask[0]) #to sqeeze the mask 3d->2d
+                    x_min, x_max = x_indices.min(), x_indices.max()
+                    y_min, y_max = y_indices.min(), y_indices.max()
+
+                    # Normalize coordinates to xyxy format
+                    x_min_norm = x_min / img_w
+                    x_max_norm = x_max / img_w
+                    y_min_norm = y_min / img_h
+                    y_max_norm = y_max / img_h
+
+                    f.write(f"{0} {score} {x_min_norm:.6f} {y_min_norm:.6f} {x_max_norm:.6f} {y_max_norm:.6f}\n")
+
+            # show_masks(masks, out_filename, image)
+
         else:
             print('no prediction')
