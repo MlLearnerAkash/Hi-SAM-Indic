@@ -21,7 +21,17 @@ from hi_sam.data.dataloader import get_im_gt_name_dict, create_dataloaders, trai
 from hi_sam.evaluation import Evaluator
 import utils.misc as misc
 import warnings
+# import torch.distributed as dist
+
 warnings.filterwarnings("ignore")
+
+
+os.environ['LOCAL_RANK'] = "0"
+os.environ["WORLD_SIZE"] = "1"
+
+# if torch.cuda.device_count() > 1:
+#     dist.init_process_group(backend='nccl', init_method='env://')
+
 
 
 def get_args_parser():
@@ -58,7 +68,7 @@ def get_args_parser():
     parser.add_argument('--dist_url', default='env://', help='url used to set up distributed training')
     parser.add_argument('--rank', default=0, type=int,
                         help='number of distributed processes')
-    parser.add_argument('--local_rank', type=int, help='local rank for dist')
+    parser.add_argument("--local-rank",'--local_rank', type=int, help='local rank for dist')
     parser.add_argument('--find_unused_params', action='store_true')
 
     parser.add_argument('--eval', action='store_true')
@@ -72,7 +82,7 @@ def get_args_parser():
 
 
 def main(train_datasets, valid_datasets, args):
-
+    print(args)
     misc.init_distributed_mode(args)
     print('world size: {}'.format(args.world_size))
     print('rank: {}'.format(args.rank))
@@ -518,7 +528,6 @@ if __name__ == "__main__":
     train_datasets = []
     val_datasets = []
     args = get_args_parser()
-
     for ds_name in args.train_datasets:
         train_datasets.append(train_dataset_map[ds_name])
     for ds_name in args.val_datasets:
