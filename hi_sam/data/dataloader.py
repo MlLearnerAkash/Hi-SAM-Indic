@@ -95,7 +95,7 @@ def create_dataloaders(
     if(len(name_im_gt_list)==0):
         return gos_dataloaders, gos_datasets
 
-    num_workers_ = 1
+    num_workers_ = 0
     if batch_size > 1:
         num_workers_ = 2
     if batch_size >= 4:

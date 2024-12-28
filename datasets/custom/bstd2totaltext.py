@@ -1,68 +1,114 @@
+# import cv2
+# import numpy as np
+# import pytesseract
+
+# # Configure pytesseract
+# pytesseract.pytesseract.tesseract_cmd = "/home/akash/miniconda3/envs/hi_sam/bin/tesseract"
+
+# # Load the image
+# image_path = '/home/akash/ws/dataset/ST/BharatST/YOLODataset/images/val/D_image_625.jpg'
+# image = cv2.imread(image_path)
+
+# # Read annotations from the text file
+# annotations_file = '/home/akash/ws/dataset/ST/BharatST/YOLODataset/labels/val/D_image_625.txt'
+# annotations = []
+
+# with open(annotations_file, 'r') as file:
+#     for line in file.readlines():
+#         # Split the line into individual values
+#         parts = line.strip().split()
+#         coords = list(map(float, parts[1:]))  # Convert coordinates to float
+#         annotations.append(coords)
+
+# # Convert annotations to pixel coordinates
+# height, width, _ = image.shape
+# polygons = []
+# for annotation in annotations:
+#     # Each annotation consists of 8 values (4 points, each with x and y)
+#     polygon = []
+#     for i in range(0, len(annotation), 2):
+#         x = int(annotation[i] * width)
+#         y = int(annotation[i + 1] * height)
+#         polygon.append((x, y))
+#     polygons.append(polygon)
+
+# # Create a mask for the annotated regions
+# mask = np.zeros((height, width), dtype=np.uint8)
+# for polygon in polygons:
+#     polygon_np = np.array(polygon, np.int32).reshape((-1, 1, 2))
+#     cv2.fillPoly(mask, [polygon_np], color=255)
+
+
+
 import cv2
 import numpy as np
 import pytesseract
+import os
 
-# Configure pytesseract
+# Configure pytesseract (if needed)
 pytesseract.pytesseract.tesseract_cmd = "/home/akash/miniconda3/envs/hi_sam/bin/tesseract"
 
-# Load the image
-image_path = '/home/akash/ws/dataset/ST/BharatST/YOLODataset/images/val/D_image_625.jpg'
-image = cv2.imread(image_path)
+def create_and_save_mask(image_path, annotations_file, target_dir):
+    """
+    Creates a mask from image annotations and saves it.
 
-# Read annotations from the text file
-annotations_file = '/home/akash/ws/dataset/ST/BharatST/YOLODataset/labels/val/D_image_625.txt'
-annotations = []
+    Args:
+      image_path: Path to the image file.
+      annotations_file: Path to the annotation file.
+      target_dir: Directory to save the mask.
+    """
+    try:
+        image = cv2.imread(image_path)
+        if image is None:
+            raise ValueError(f"Could not read image: {image_path}")
 
-with open(annotations_file, 'r') as file:
-    for line in file.readlines():
-        # Split the line into individual values
-        parts = line.strip().split()
-        coords = list(map(float, parts[1:]))  # Convert coordinates to float
-        annotations.append(coords)
+        height, width, _ = image.shape
+        annotations = []
+        with open(annotations_file, 'r') as file:
+            for line in file.readlines():
+                parts = line.strip().split()
+                coords = list(map(float, parts[1:]))
+                annotations.append(coords)
 
-# Convert annotations to pixel coordinates
-height, width, _ = image.shape
-polygons = []
-for annotation in annotations:
-    # Each annotation consists of 8 values (4 points, each with x and y)
-    polygon = []
-    for i in range(0, len(annotation), 2):
-        x = int(annotation[i] * width)
-        y = int(annotation[i + 1] * height)
-        polygon.append((x, y))
-    polygons.append(polygon)
+        polygons = []
+        for annotation in annotations:
+            polygon = []
+            for i in range(0, len(annotation), 2):
+                x = int(annotation[i] * width)
+                y = int(annotation[i + 1] * height)
+                polygon.append((x, y))
+            polygons.append(polygon)
 
-# Create a mask for the annotated regions
-mask = np.zeros((height, width), dtype=np.uint8)
-for polygon in polygons:
-    polygon_np = np.array(polygon, np.int32).reshape((-1, 1, 2))
-    cv2.fillPoly(mask, [polygon_np], color=255)
+        mask = np.zeros((height, width), dtype=np.uint8)
+        for polygon in polygons:
+            polygon_np = np.array(polygon, np.int32).reshape((-1, 1, 2))
+            cv2.fillPoly(mask, [polygon_np], color=255)
 
-# Grayscale the image
-gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+        # Save the mask
+        mask_filename = os.path.splitext(os.path.basename(image_path))[0] + "_mask.jpeg"
+        mask_path = os.path.join(target_dir, mask_filename)
+        cv2.imwrite(mask_path, mask)
+        print(f"Mask saved to: {mask_path}")
 
-# Apply thresholding
-thresh = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)[1]
+    except Exception as e:
+        print(f"Error processing {image_path}: {e}")
 
-# Morphological operations to remove noise
-kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (1, 1))
-opening = cv2.morphologyEx(thresh, cv2.MORPH_OPEN, kernel, iterations=1)
+if __name__ == "__main__":
+    images_dir = '/home/akash/ws/dataset/ST/BharatST/YOLODataset/images/train/'  # Replace with your images directory
+    annotations_dir = '/home/akash/ws/dataset/ST/BharatST/YOLODataset/labels/train/'  # Replace with your annotations directory
+    target_dir = '/home/akash/ws/dataset/ST/BharatST/YOLODataset/Word_mask/train'  # Replace with your target directory
+    bad_file_list=[]
+    for filename in os.listdir(images_dir):
+        if filename.endswith(('.jpg', '.png', '.jpeg')):  # Adjust extensions as needed
+            image_path = os.path.join(images_dir, filename)
+            annotations_file = os.path.join(annotations_dir, filename.split(".")[0] + '.txt')
 
-# Mask the annotated regions
-inverted_opening = cv2.bitwise_and(255 - opening, mask)
-
-# Extract words in white pixels
-# Retain only white pixels (words) in the annotated regions
-words_only = cv2.bitwise_and(opening, mask)
-
-# Save and visualize the result
-cv2.imwrite('words_only.png', words_only)
-
-# Optional: Perform text extraction on the result
-data = pytesseract.image_to_string(words_only, lang='eng', config='--psm 6')
-print("Extracted Text:\n", data)
-
-# Visualize results (optional)
-# cv2.imshow('Words Only', words_only)
-# cv2.waitKey(0)
-# cv2.destroyAllWindows()
+            # Check if the annotation file exists
+            if os.path.exists(annotations_file):
+                create_and_save_mask(image_path, annotations_file, target_dir)
+            else:
+                print(f"Annotation file not found for {filename}")
+                bad_file_list.append(filename)
+    with open('bad_file_list.txt', 'w') as file:
+        for item in bad_file_list:
+            file.write(f"{item}\n")

@@ -14,13 +14,18 @@ import random
 from typing import Dict, List, Tuple
 import time
 import datetime
-
+import mlflow
+import dagshub
 from hi_sam.modeling.build import model_registry
 from hi_sam.modeling.loss import loss_masks, loss_hi_masks, loss_iou_mse, loss_hi_iou_mse
 from hi_sam.data.dataloader import get_im_gt_name_dict, create_dataloaders, train_transforms, eval_transforms, custom_collate_fn
 from hi_sam.evaluation import Evaluator
 import utils.misc as misc
 import warnings
+
+import PIL.Image
+PIL.Image.MAX_IMAGE_PIXELS = 933120000
+
 # import torch.distributed as dist
 
 warnings.filterwarnings("ignore")
@@ -29,10 +34,12 @@ warnings.filterwarnings("ignore")
 os.environ['LOCAL_RANK'] = "0"
 os.environ["WORLD_SIZE"] = "1"
 
-# if torch.cuda.device_count() > 1:
-#     dist.init_process_group(backend='nccl', init_method='env://')
-
-
+try:
+    os.environ['MLFLOW_TRACKING_URI'] = 'http://10.10.16.13:5000'
+    os.environ["MLFLOW_EXPERIMENT_NAME"] = "Hi-SAM-Indic"
+    # dagshub.init(dagshub.init(repo_owner='manna.phys', repo_name='Hi-SAM-Indic', mlflow=True))
+except ImportError:
+    print("mlflow not initlaized")
 
 def get_args_parser():
     parser = argparse.ArgumentParser('Hi-SAM', add_help=False)
@@ -178,139 +185,151 @@ def train(args, model, optimizer, train_dataloaders, train_datasets_names, lr_sc
     _ = model.to(device=args.device)
     from torch.cuda.amp import autocast, GradScaler
     gradsclaler = GradScaler()
+    with mlflow.start_run():
+        for epoch in range(epoch_start, epoch_num):
+            print("epoch: ", epoch, " lr: ", optimizer.param_groups[0]["lr"])
+            metric_logger = misc.MetricLogger(delimiter="  ")
+            train_dataloaders.batch_sampler.sampler.set_epoch(epoch)
 
-    for epoch in range(epoch_start, epoch_num):
-        print("epoch: ", epoch, " lr: ", optimizer.param_groups[0]["lr"])
-        metric_logger = misc.MetricLogger(delimiter="  ")
-        train_dataloaders.batch_sampler.sampler.set_epoch(epoch)
-
-        for data in metric_logger.log_every(train_dataloaders, 50):
-            inputs, labels = data['image'], data['label'].to(model.device)  # (bs,3,1024,1024), (bs,1,1024,1024)
-            batched_input = []
-            if args.hier_det:
-                para_masks, line_masks, word_masks = data['paragraph_masks'], data['line_masks'], data['word_masks']
-                line2para_idx = data['line2paragraph_index']
-                fg_points, para_masks, line_masks, word_masks = misc.sample_foreground_points(labels, para_masks, line_masks, word_masks, line2para_idx)
-            for b_i in range(len(inputs)):
-                dict_input = dict()
-                dict_input['image'] = inputs[b_i].to(model.device).contiguous()
-                dict_input['original_size'] = inputs[b_i].shape[-2:]
+            for data in metric_logger.log_every(train_dataloaders, 50):
+                inputs, labels = data['image'], data['label'].to(model.device)  # (bs,3,1024,1024), (bs,1,1024,1024)
+                batched_input = []
                 if args.hier_det:
-                    point_coords = fg_points[b_i][:, None, :]
-                    dict_input['point_coords'] = point_coords
-                    dict_input['point_labels'] = torch.ones((point_coords.shape[0], point_coords.shape[1]), device=point_coords.device)
-                batched_input.append(dict_input)
+                    para_masks, line_masks, word_masks = data['paragraph_masks'], data['line_masks'], data['word_masks']
+                    line2para_idx = data['line2paragraph_index']
+                    fg_points, para_masks, line_masks, word_masks = misc.sample_foreground_points(labels, para_masks, line_masks, word_masks, line2para_idx)
+                for b_i in range(len(inputs)):
+                    dict_input = dict()
+                    dict_input['image'] = inputs[b_i].to(model.device).contiguous()
+                    dict_input['original_size'] = inputs[b_i].shape[-2:]
+                    if args.hier_det:
+                        point_coords = fg_points[b_i][:, None, :]
+                        dict_input['point_coords'] = point_coords
+                        dict_input['point_labels'] = torch.ones((point_coords.shape[0], point_coords.shape[1]), device=point_coords.device)
+                    batched_input.append(dict_input)
 
-            with autocast():
-                if args.hier_det:
-                    (up_masks_logits, up_masks, iou_output, hr_masks_logits, hr_masks, hr_iou_output,
-                     hi_masks_logits, hi_iou_output, word_masks_logits) = model(batched_input, multimask_output=False)
-                    loss_focal, loss_dice = loss_masks(up_masks_logits, labels / 255.0, len(up_masks_logits))
-                    loss_mse = loss_iou_mse(iou_output, up_masks, labels)
-                    loss_lr = loss_focal * 20 + loss_dice + loss_mse
+                with autocast():
+                    if args.hier_det:
+                        (up_masks_logits, up_masks, iou_output, hr_masks_logits, hr_masks, hr_iou_output,
+                        hi_masks_logits, hi_iou_output, word_masks_logits) = model(batched_input, multimask_output=False)
+                        loss_focal, loss_dice = loss_masks(up_masks_logits, labels / 255.0, len(up_masks_logits))
+                        loss_mse = loss_iou_mse(iou_output, up_masks, labels)
+                        loss_lr = loss_focal * 20 + loss_dice + loss_mse
 
-                    loss_focal_hr, loss_dice_hr = loss_masks(hr_masks_logits, labels / 255.0, len(up_masks_logits))
-                    loss_mse_hr = loss_iou_mse(hr_iou_output, hr_masks, labels)
-                    loss_hr = loss_focal_hr * 20 + loss_dice_hr + loss_mse_hr
+                        loss_focal_hr, loss_dice_hr = loss_masks(hr_masks_logits, labels / 255.0, len(up_masks_logits))
+                        loss_mse_hr = loss_iou_mse(hr_iou_output, hr_masks, labels)
+                        loss_hr = loss_focal_hr * 20 + loss_dice_hr + loss_mse_hr
 
-                    if word_masks is not None:
-                        loss_focal_word, loss_dice_word = loss_hi_masks(
-                            hi_masks_logits[:, 0:1, :, :], word_masks, len(hi_masks_logits)
-                        )
-                        loss_focal_word_384, loss_dice_word_384 = loss_hi_masks(
-                            word_masks_logits[:, 0:1, :, :], word_masks, len(hi_masks_logits),
-                        )
-                        loss_word = loss_focal_word + loss_dice_word
-                        loss_word_384 = loss_focal_word_384 + loss_dice_word_384
+                        if word_masks is not None:
+                            loss_focal_word, loss_dice_word = loss_hi_masks(
+                                hi_masks_logits[:, 0:1, :, :], word_masks, len(hi_masks_logits)
+                            )
+                            loss_focal_word_384, loss_dice_word_384 = loss_hi_masks(
+                                word_masks_logits[:, 0:1, :, :], word_masks, len(hi_masks_logits),
+                            )
+                            loss_word = loss_focal_word + loss_dice_word
+                            loss_word_384 = loss_focal_word_384 + loss_dice_word_384
 
-                        loss_focal_line, loss_dice_line = loss_hi_masks(
-                            hi_masks_logits[:, 1:2, :, :], line_masks, len(hi_masks_logits)
-                        )
-                        loss_mse_line = loss_hi_iou_mse(
-                            hi_iou_output[:, 1:2], hi_masks_logits[:, 1:2, :, :], model.module.mask_threshold, line_masks
-                        )
-                        loss_line = loss_focal_line + loss_dice_line + loss_mse_line
+                            loss_focal_line, loss_dice_line = loss_hi_masks(
+                                hi_masks_logits[:, 1:2, :, :], line_masks, len(hi_masks_logits)
+                            )
+                            loss_mse_line = loss_hi_iou_mse(
+                                hi_iou_output[:, 1:2], hi_masks_logits[:, 1:2, :, :], model.module.mask_threshold, line_masks
+                            )
+                            loss_line = loss_focal_line + loss_dice_line + loss_mse_line
 
-                        loss_focal_para, loss_dice_para = loss_hi_masks(
-                            hi_masks_logits[:, 2:3, :, :], para_masks, len(hi_masks_logits)
-                        )
-                        loss_mse_para = loss_hi_iou_mse(
-                            hi_iou_output[:, 2:3], hi_masks_logits[:, 2:3, :, :], model.module.mask_threshold, para_masks
-                        )
-                        loss_para = loss_focal_para + loss_dice_para + loss_mse_para
+                            loss_focal_para, loss_dice_para = loss_hi_masks(
+                                hi_masks_logits[:, 2:3, :, :], para_masks, len(hi_masks_logits)
+                            )
+                            loss_mse_para = loss_hi_iou_mse(
+                                hi_iou_output[:, 2:3], hi_masks_logits[:, 2:3, :, :], model.module.mask_threshold, para_masks
+                            )
+                            loss_para = loss_focal_para + loss_dice_para + loss_mse_para
 
-                        loss = loss_lr + loss_hr + loss_word + loss_word_384 + loss_line + loss_para * 0.5
-                        loss_dict = {
-                            "loss_lr_mask": loss_lr,
-                            "loss_hr_mask": loss_hr,
-                            "loss_word": loss_word,
-                            "loss_word_384": loss_word_384,
-                            "loss_line": loss_line,
-                            "loss_para": loss_para * 0.5
-                        }
+                            loss = loss_lr + loss_hr + loss_word + loss_word_384 + loss_line + loss_para * 0.5
+                            loss_dict = {
+                                "loss_lr_mask": loss_lr,
+                                "loss_hr_mask": loss_hr,
+                                "loss_word": loss_word,
+                                "loss_word_384": loss_word_384,
+                                "loss_line": loss_line,
+                                "loss_para": loss_para * 0.5
+                            }
+                            
+                        else:
+                            raise NotImplementedError
                     else:
-                        raise NotImplementedError
-                else:
-                    up_masks_logits, up_masks, iou_output, hr_masks_logits, hr_masks, hr_iou_output = model(
-                        batched_input, multimask_output=False
-                    )
-                    loss_focal, loss_dice = loss_masks(up_masks_logits, labels / 255.0, len(up_masks_logits))
-                    loss_focal_hr, loss_dice_hr = loss_masks(hr_masks_logits, labels / 255.0, len(up_masks_logits))
-                    loss_mse = loss_iou_mse(iou_output, up_masks, labels)
-                    loss_mse_hr = loss_iou_mse(hr_iou_output, hr_masks, labels)
-                    loss = loss_focal * 20 + loss_dice + loss_mse + loss_focal_hr * 20 + loss_dice_hr + loss_mse_hr
-                    loss_dict = {
-                        "loss_iou_mse": loss_mse,
-                        "loss_dice": loss_dice,
-                        "loss_focal": loss_focal * 20,
-                        "loss_iou_mse_hr": loss_mse_hr,
-                        "loss_dice_hr": loss_dice_hr,
-                        "loss_focal_hr": loss_focal_hr * 20,
-                    }
-                # reduce losses over all GPUs for logging purposes
-                loss_dict_reduced = misc.reduce_dict(loss_dict)
-                losses_reduced_scaled = sum(loss_dict_reduced.values())
-                loss_value = losses_reduced_scaled.item()
-
-            optimizer.zero_grad()
-            gradsclaler.scale(loss).backward()
-            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0, norm_type=2)
-            gradsclaler.step(optimizer)
-            gradsclaler.update()
-            metric_logger.update(training_loss=loss_value, **loss_dict_reduced)
-
-        metric_logger.synchronize_between_processes()
-        train_stats = {k: meter.global_avg for k, meter in metric_logger.meters.items() if meter.count > 0}
-
-        if (epoch - epoch_start) % args.valid_period == 0 or (epoch + 1) == epoch_num:
-            if args.hier_det:
-                model.module.hier_det = False  # disable hi_decoder temporally
-            test_stats = evaluate(args, model, valid_dataloaders, valid_datasets_names)
-            if args.hier_det:
-                model.module.hier_det = True
-            if misc.is_main_process():
-                for ds_idx, (ds_name, ds_results) in enumerate(test_stats.items()):
-                    iou_result = ds_results.get('001-text-IOU')
-                    iou_result_hs = ds_results.get('001-text-IOU_hr')
-                    iou_result = max(iou_result, iou_result_hs)
-                    if iou_result > best_iou[ds_idx]:
-                        checkpoint = {
-                            'model': model.module.state_dict(),
-                            'optimizer': optimizer.state_dict(),
-                            'lr_scheduler': lr_scheduler.state_dict(),
-                            'epoch': epoch
+                        up_masks_logits, up_masks, iou_output, hr_masks_logits, hr_masks, hr_iou_output = model(
+                            batched_input, multimask_output=False
+                        )
+                        loss_focal, loss_dice = loss_masks(up_masks_logits, labels / 255.0, len(up_masks_logits))
+                        loss_focal_hr, loss_dice_hr = loss_masks(hr_masks_logits, labels / 255.0, len(up_masks_logits))
+                        loss_mse = loss_iou_mse(iou_output, up_masks, labels)
+                        loss_mse_hr = loss_iou_mse(hr_iou_output, hr_masks, labels)
+                        loss = loss_focal * 20 + loss_dice + loss_mse + loss_focal_hr * 20 + loss_dice_hr + loss_mse_hr
+                        loss_dict = {
+                            "loss_iou_mse": loss_mse,
+                            "loss_dice": loss_dice,
+                            "loss_focal": loss_focal * 20,
+                            "loss_iou_mse_hr": loss_mse_hr,
+                            "loss_dice_hr": loss_dice_hr,
+                            "loss_focal_hr": loss_focal_hr * 20,
                         }
-                        torch.save(checkpoint, os.path.join(args.output, ds_name+"_best.pth"))
-                        best_iou[ds_idx] = iou_result
-            train_stats.update(test_stats)
-            model.train()
-        lr_scheduler.step()
+                    # reduce losses over all GPUs for logging purposes
+                    loss_dict_reduced = misc.reduce_dict(loss_dict)
+                    losses_reduced_scaled = sum(loss_dict_reduced.values())
+                    loss_value = losses_reduced_scaled.item()
+
+                optimizer.zero_grad()
+                gradsclaler.scale(loss).backward()
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0, norm_type=2)
+                gradsclaler.step(optimizer)
+                gradsclaler.update()
+                metric_logger.update(training_loss=loss_value, **loss_dict_reduced)
+
+            metric_logger.synchronize_between_processes()
+            train_stats = {k: meter.global_avg for k, meter in metric_logger.meters.items() if meter.count > 0}
+
+            if (epoch - epoch_start) % args.valid_period == 0 or (epoch + 1) == epoch_num:
+                if args.hier_det:
+                    model.module.hier_det = False  # disable hi_decoder temporally
+                test_stats = evaluate(args, model, valid_dataloaders, valid_datasets_names)
+
+                if args.hier_det:
+                    model.module.hier_det = True
+                if misc.is_main_process():
+                    for ds_idx, (ds_name, ds_results) in enumerate(test_stats.items()):
+                        iou_result = ds_results.get('001-text-IOU')
+                        iou_result_hs = ds_results.get('001-text-IOU_hr')
+                        iou_result = max(iou_result, iou_result_hs)
+                        if iou_result > best_iou[ds_idx]:
+                            checkpoint = {
+                                'model': model.module.state_dict(),
+                                'optimizer': optimizer.state_dict(),
+                                'lr_scheduler': lr_scheduler.state_dict(),
+                                'epoch': epoch
+                            }
+                            torch.save(checkpoint, os.path.join(args.output, ds_name+"_best.pth"))
+                            #Mlflow Model logging
+                            mlflow.pytorch.log_model(model, "models")
+                            mlflow.log_artifact(os.path.join(args.output, ds_name+"_best.pth"))
+                            best_iou[ds_idx] = iou_result
+                train_stats.update(test_stats)
+                model.train()
+            lr_scheduler.step()
+            #Mlflow Metrics logging
+            mlflow.log_metrics(dict(train_stats["TotalText-test"]), step=epoch)
+            mlflow.log_metrics(dict(test_stats["TotalText-test"]), step=epoch)
 
     # Finish training
     print("Training Reaches The Maximum Epoch Number")
     if misc.is_main_process():
         model_name = "/final_epoch_" + str(epoch_num) + ".pth"
         torch.save(model.module.state_dict(), args.output + model_name)
+        #Mlflow Model logging
+        mlflow.pytorch.log_model(model, "models")
+        mlflow.log_artifact(args.output + model_name)
+        mlflow.end_run()
 
 
 def inference_on_dataset(model, data_loader, data_name, evaluator, args):
@@ -392,7 +411,7 @@ def inference_on_dataset(model, data_loader, data_name, evaluator, args):
     results = evaluator.evaluate()
     if results is None:
         results = {}
-
+    
     return results
 
 
@@ -422,10 +441,10 @@ if __name__ == "__main__":
     # train
     totaltext_train = {
         "name": "TotalText-train",
-        "im_dir": "./datasets/TotalText/Images/Train",
-        "gt_dir": "./datasets/TotalText/groundtruth_pixel/Train",
+        "im_dir": "/home/akash/ws/dataset/ST/BharatST/Hi_SAM_Dataset/Images/Train",
+        "gt_dir": "/home/akash/ws/dataset/ST/BharatST/Hi_SAM_Dataset/groundtruth_pixel/Train",
         "im_ext": ".jpg",
-        "gt_ext": ".jpg",
+        "gt_ext": ".jpeg",
     }
     hiertext_train = {
         "name": "HierText-train",
@@ -484,10 +503,10 @@ if __name__ == "__main__":
     # validation and test
     totaltext_test = {
         "name": "TotalText-test",
-        "im_dir": "./datasets/TotalText/Images/Test",
-        "gt_dir": "./datasets/TotalText/groundtruth_pixel/Test",
+        "im_dir": "/home/akash/ws/dataset/ST/BharatST/Hi_SAM_Dataset/Images/Test",
+        "gt_dir": "/home/akash/ws/dataset/ST/BharatST/Hi_SAM_Dataset/groundtruth_pixel/Test",
         "im_ext": ".jpg",
-        "gt_ext": ".jpg"
+        "gt_ext": ".jpeg"
     }
     hiertext_val = {
         "name": "HierText-val",
